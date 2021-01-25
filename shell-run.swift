@@ -33,7 +33,7 @@ enum /* namespace */ Sh {
 
 		process.waitUntilExit()
 
-		assert(!process.isRunning) // or .terminationStatus coredumps
+		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
 		return (siphon(pipes.stdout), siphon(pipes.stderr), process.terminationStatus)
 	}
 
