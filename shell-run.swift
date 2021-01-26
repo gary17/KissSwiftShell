@@ -35,7 +35,7 @@ enum /* namespace */ Sh {
 
 	static func which(_ command: String) throws -> String? {
 		// the command: (/bin/sh -l -c "which ls") expands "ls" into "/bin/ls"
-		let out = try Sh.run(path: "/bin/sh" , args: ["-l", "-c", "which \(command)"])
+		let out = try Sh.run(path: Config.Tool.sh, args: ["-l", "-c", "which \(command)"])
 
 		guard let stdout = out.stdout else { return nil }
 		return stdout.trimmingCharacters(in: NSCharacterSet.whitespacesAndNewlines)
@@ -59,7 +59,6 @@ enum /* namespace */ Sh {
 
 		if usePathCache {
 			// prefer guaranteed local cache performance over unguaranteed /usr/bin/env behavior
-
 			var path: String
 			if let hit = /* check-and-read */ pathCache[command] { path = hit }
 			else {
@@ -71,12 +70,18 @@ enum /* namespace */ Sh {
 		}
 		else {			
 			// prefer optimistic /usr/bin/env performance over likely /usr/bin/which slowness
-
-			return try Sh.run(path: "/usr/bin/env", args: [command] + (args ?? []))
+			return try Sh.run(path: Config.Tool.env, args: [command] + (args ?? []))
 		}
 	}
 
-	typealias PathCache = [String : String] // FIXME: LRU (memory)
+	private enum /* namespace */ Config {
+		enum /* namespace */ Tool {
+			static let sh = "/bin/sh"
+			static let env = "/usr/bin/env"
+		}
+	}
+
+	private typealias PathCache = [String : String] // FIXME: LRU (memory)
 	private static var pathCache: PathCache = [:] // e.g., "ls" >> /usr/bin/which >> "/bin/ls"
 }
 
