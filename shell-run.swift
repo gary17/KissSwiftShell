@@ -77,7 +77,7 @@ enum /* namespace */ Sh {
 	}
 
 	typealias PathCache = [String : String] // FIXME: LRU (memory)
-	private static var pathCache: [String : String] = [:] // e.g., "ls" >> /usr/bin/which >> "/bin/ls"
+	private static var pathCache: PathCache = [:] // e.g., "ls" >> /usr/bin/which >> "/bin/ls"
 }
 
 extension Sh.RunError: LocalizedError {
