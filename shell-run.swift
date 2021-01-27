@@ -4,10 +4,10 @@ import Foundation
 
 enum /* namespace */ Sh {
 	enum RunError: Error { case commandNotFound(command: String) }
-	typealias Outcome = (stdout: String?, stderr: String?, rc: /* Process.terminationStatus */ Int32)
+	typealias RunResult = (stdout: String?, stderr: String?, rc: /* Process.terminationStatus */ Int32)
 
 	@discardableResult // FYI: Process API uses optionals vs. empty collection instances, follow
-	static func run(path: String, args: [String]? = nil, env: [String : String]? = nil) throws -> Outcome {
+	static func run(path: String, args: [String]? = nil, env: [String : String]? = nil) throws -> RunResult {
 		let process = Process() // spawn a subprocess
 		process.executableURL = URL(fileURLWithPath: path)
 		process.arguments = args
@@ -35,14 +35,14 @@ enum /* namespace */ Sh {
 
 	static func which(_ command: String) throws -> String? {
 		// the command: (/bin/sh -l -c "which ls") expands "ls" into "/bin/ls"
-		let out = try Sh.run(path: Config.Tool.sh, args: ["-l", "-c", "which \(command)"])
+		let out = try Sh.run(path: Config.Tools.sh, args: ["-l", "-c", "which \(command)"])
 
 		guard let stdout = out.stdout else { return nil }
 		return stdout.trimmingCharacters(in: NSCharacterSet.whitespacesAndNewlines)
 	}
 
 	@discardableResult
-	static func run(_ command: String, _ args: [String]? = nil, usePathCache: Bool = true) throws -> Outcome {
+	static func run(_ command: String, _ args: [String]? = nil, usePathCache: Bool = true) throws -> RunResult {
 
 		/*
 
@@ -70,12 +70,12 @@ enum /* namespace */ Sh {
 		}
 		else {			
 			// prefer optimistic /usr/bin/env performance over likely /usr/bin/which slowness
-			return try Sh.run(path: Config.Tool.env, args: [command] + (args ?? []))
+			return try Sh.run(path: Config.Tools.env, args: [command] + (args ?? []))
 		}
 	}
 
 	private enum /* namespace */ Config {
-		enum /* namespace */ Tool {
+		enum /* namespace */ Tools {
 			static let sh = "/bin/sh"
 			static let env = "/usr/bin/env"
 		}
@@ -99,14 +99,20 @@ do {
 
 		do
 		{
-			let outcome = try Sh.run("ls", nil, usePathCache: false)
-			if outcome.rc == 0, let stdout = outcome.stdout { print(stdout) }
+			let result = try Sh.run("ls", nil, usePathCache: false)
+
+			switch result {
+					case result.rc == 0, let stdout = result.stdout:
+						print(stdout)
+			}
+
+			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
 		do
 		{
-			let outcome = try Sh.run("ls", ["-l"])
-			if outcome.rc == 0, let stdout = outcome.stdout { print(stdout) }
+			let result = try Sh.run("ls", ["-l"])
+			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
 		do
