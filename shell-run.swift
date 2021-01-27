@@ -100,12 +100,6 @@ do {
 		do
 		{
 			let result = try Sh.run("ls", nil, usePathCache: false)
-
-			switch result {
-					case result.rc == 0, let stdout = result.stdout:
-						print(stdout)
-			}
-
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
