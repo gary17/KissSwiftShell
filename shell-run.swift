@@ -16,9 +16,9 @@ enum /* namespace */ Sh {
 
 		process.environment = env
 
-		process.standardOutput = pipes.stdout
+		process.standardOutput = pipes.stdout // FYI: a FileHandle or a Pipe
 		process.standardError = pipes.stderr
-		
+
 		try process.run()
 
 		/* nested */ func siphon(_ pipe: Pipe) -> String? {
@@ -59,7 +59,7 @@ enum /* namespace */ Sh {
 
 		if usePathCache {
 			// prefer guaranteed local cache performance over unguaranteed /usr/bin/env behavior
-			var path: String
+			let path: String
 			if let hit = /* check-and-read */ pathCache[command] { path = hit }
 			else {
 				guard let lookup = try Sh.which(command) else { throw RunError.commandNotFound(command: command) }
@@ -97,21 +97,18 @@ extension Sh.RunError: LocalizedError {
 do {
 	let start = Date().timeIntervalSince1970
 
-		do
-		{
+		do {
 			let result = try Sh.run("ls", nil, usePathCache: false)
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
-		do
-		{
+		do {
 			let result = try Sh.run("ls", ["-l"])
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
-		do
-		{
-			try Sh.run("ls65536")
+		do {
+			try Sh.run("ls65535")
 		}
 		catch {
 			print(error.localizedDescription)
