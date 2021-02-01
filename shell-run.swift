@@ -2,48 +2,27 @@
 
 import Foundation
 
-enum /* namespace */ Sh {
+class ShCmd {
 	enum RunError: Error { case commandNotFound(command: String) }
+
 	typealias RunResult = (stdout: String?, stderr: String?, rc: /* Process.terminationStatus */ Int32)
 
-	@discardableResult // FYI: Process API uses optionals vs. empty collection instances, follow
-	static func run(path: String, args: [String]? = nil, env: [String : String]? = nil) throws -> RunResult {
-		let process = Process() // spawn a subprocess
+	// FYI: Process API uses optionals vs. empty collection instances; follow
+	init(path: String, args: [String]? = nil, env: [String : String]? = nil) {
+		// will spawn a subprocess
 		process.executableURL = URL(fileURLWithPath: path)
 		process.arguments = args
-
-		let pipes = (stdout: Pipe(), stderr: Pipe())
 
 		process.environment = env
 
 		process.standardOutput = pipes.stdout // FYI: a FileHandle or a Pipe
 		process.standardError = pipes.stderr
-
-		try process.run()
-
-		/* nested */ func siphon(_ pipe: Pipe) -> String? {
-			let data = pipe.fileHandleForReading.readDataToEndOfFile()
-			guard data.count > 0 else { return nil }
-			return String(decoding: data, as: UTF8.self)
-		}
-
-		process.waitUntilExit()
-
-		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
-		return (siphon(pipes.stdout), siphon(pipes.stderr), process.terminationStatus)
 	}
-
-	static func which(_ command: String) throws -> String? {
-		// the command: (/bin/sh -l -c "which ls") expands "ls" into "/bin/ls"
-		let out = try Sh.run(path: Config.Tools.sh, args: ["-l", "-c", "which \(command)"])
-
-		guard let stdout = out.stdout else { return nil }
-		return stdout.trimmingCharacters(in: NSCharacterSet.whitespacesAndNewlines)
-	}
-
-	@discardableResult
-	static func run(_ command: String, _ args: [String]? = nil, usePathCache: Bool = true) throws -> RunResult {
-
+	
+	// FYI: potentially multiple points of failure, prefer a throwing over nullable initializer
+	convenience init(_ command: String, _ args: [String]? = nil, env: [String : String]? = nil,
+		usePathCache: Bool = true) throws {
+		
 		/*
 
 		EXECUTABLE PATH RESOLUTION STRATEGY
@@ -59,33 +38,65 @@ enum /* namespace */ Sh {
 
 		if usePathCache {
 			// prefer guaranteed local cache performance over unguaranteed /usr/bin/env behavior
-			let path: String
-			if let hit = /* check-and-read */ pathCache[command] { path = hit }
-			else {
-				guard let lookup = try Sh.which(command) else { throw RunError.commandNotFound(command: command) }
-				pathCache[command] = lookup // cache-in
-				path = lookup
+			if let hit = /* check-and-read */ ShCmd.pathCache[command] {
+				self.init(path: hit, args: args, env: env)
 			}
-			return try Sh.run(path: path, args: args)
+			else {
+				// the command: (/bin/sh -l -c "which ls") expands "ls" into "/bin/ls"
+				let cmd = ShCmd(path: Config.Tools.sh, args: ["-l", "-c", "which \(command)"])
+				let result = try cmd.run()
+				
+				// FIXME: verify the return code
+
+				guard let stdout = result.stdout else { throw RunError.commandNotFound(command: command) }
+				let lookup = stdout.trimmingCharacters(in: NSCharacterSet.whitespacesAndNewlines)
+
+				// FIXME: verify only one line was returned
+
+				ShCmd.pathCache[command] = lookup // cache-in
+				self.init(path: lookup, args: args, env: env)
+			}
 		}
-		else {			
+		else {
 			// prefer optimistic /usr/bin/env performance over likely /usr/bin/which slowness
-			return try Sh.run(path: Config.Tools.env, args: [command] + (args ?? []))
+			self.init(path: Config.Tools.env, args: [command] + (args ?? []), env: env)
 		}
 	}
+	
+	@discardableResult
+	func run() throws -> RunResult {
+		try process.run()
 
+		/* nested */ func siphon(_ pipe: Pipe) -> String? {
+			let data = pipe.fileHandleForReading.readDataToEndOfFile()
+			guard data.count > 0 else { return nil }
+			return String(decoding: data, as: UTF8.self)
+		}
+
+		process.waitUntilExit()
+
+		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
+		return (siphon(pipes.stdout), siphon(pipes.stderr), process.terminationStatus)
+	}
+
+	private let pipes = (stdout: Pipe(), stderr: Pipe())
+	private let process = Process() // spawn a subprocess
+
+	private typealias PathCache = [String : String] // FIXME: LRU (memory)
+	private /* shared */ static var pathCache: PathCache = [:] // e.g., "ls" >> /usr/bin/which >> "/bin/ls"
+}
+
+extension ShCmd
+{
 	private enum /* namespace */ Config {
 		enum /* namespace */ Tools {
 			static let sh = "/bin/sh"
 			static let env = "/usr/bin/env"
 		}
 	}
-
-	private typealias PathCache = [String : String] // FIXME: LRU (memory)
-	private static var pathCache: PathCache = [:] // e.g., "ls" >> /usr/bin/which >> "/bin/ls"
 }
 
-extension Sh.RunError: LocalizedError {
+extension ShCmd.RunError: LocalizedError {
 	var errorDescription: String? {
 		switch self {
 			case .commandNotFound(let command):
@@ -98,17 +109,17 @@ do {
 	let start = Date().timeIntervalSince1970
 
 		do {
-			let result = try Sh.run("ls", nil, usePathCache: false)
+			let result = try ShCmd("ls", nil, usePathCache: false).run()
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
 		do {
-			let result = try Sh.run("ls", ["-l"])
+			let result = try ShCmd("ls", ["-l"]).run()
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
 		do {
-			try Sh.run("ls65535")
+			try ShCmd("ls65535").run()
 		}
 		catch {
 			print(error.localizedDescription)
