@@ -4,12 +4,7 @@ import Foundation
 
 class ShCmd {
 	enum RunError: Error { case systemError, commandNotFound(command: String) }
-
-	struct RunResult {
-		let stdout: String?
-		let stderr: String?
-		let rc: Int32 // follows Process.terminationStatus
-	}
+	struct RunResult { let stdout: String?, stderr: String?, rc: /* follows Process.terminationStatus */ Int32 }
 	
 	// Process API uses optionals vs. empty collection instances; follow
 	init(path: String, args: [String]? = nil, env: [String : String]? = nil) {
