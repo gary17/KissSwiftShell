@@ -121,6 +121,12 @@ extension ShCmd.RunError: LocalizedError {
 }
 
 extension ShCmd {
+	static func |(lhs: ShCmd, rhs: ShCmd) throws -> RunResult {
+		return try lhs.run(pipedTo: rhs)
+	}
+}
+
+extension ShCmd {
 	// special commands
 	static func which(_ command: String) throws -> String {
 		// the command: (/bin/sh -l -c "which ls") expands "ls" into "/bin/ls"
@@ -180,7 +186,7 @@ do {
 		}
 
 		do {
-			let result = try ShCmd("echo", ["1 2 3"]).run(pipedTo: ShCmd("rev"))
+			let result = try ShCmd("echo", ["1 2 3"]) | ShCmd("rev")
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
