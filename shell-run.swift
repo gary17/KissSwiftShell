@@ -2,29 +2,25 @@
 
 import Foundation
 
-extension Pipe {
-	func siphon() -> String? {
-		let data = self.fileHandleForReading.readDataToEndOfFile()
-		guard data.count > 0 else { return nil }
-		return String(decoding: data, as: UTF8.self)
-	}
-}
-
 class ShCmd {
 	enum RunError: Error { case systemError, commandNotFound(command: String) }
 
-	typealias RunResult = (stdout: String?, stderr: String?, rc: /* Process.terminationStatus */ Int32)
-
+	struct RunResult {
+		let stdout: String?
+		let stderr: String?
+		let rc: Int32 // follows Process.terminationStatus
+	}
+	
 	// Process API uses optionals vs. empty collection instances; follow
 	init(path: String, args: [String]? = nil, env: [String : String]? = nil) {
-		process.executableURL = URL(fileURLWithPath: path) // will spawn a subprocess
+		process.executableURL = URL(fileURLWithPath: path)
 
-		// WARNING: the setter does not like nil-s; 'must provide array of arguments' or NSInvalidArgumentException
+		// WARNING: the setter does not like nil; 'must provide array of arguments' or face NSInvalidArgumentException
 		if let args = args { process.arguments = args }
 		if let env = env { process.environment = env }
 
-		process.standardOutput = pipes.stdout // a FileHandle or a Pipe
-		process.standardError = pipes.stderr
+		process.standardOutput = Pipe() // a FileHandle or a Pipe
+		process.standardError = Pipe()
 	}
 	
 	// potentially multiple points of failure; prefer a throwing over nullable initializer
@@ -67,14 +63,12 @@ class ShCmd {
 		try process.run()
 
 		process.waitUntilExit()
-
-		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
-		return (pipes.stdout.siphon(), pipes.stderr.siphon(), process.terminationStatus)
+		return RunResult(for: process)
 	}
 
 	@discardableResult
 	func run(pipedTo rhs: ShCmd) throws -> RunResult {
-		rhs.process.standardInput = pipes.stdout
+		rhs.process.standardInput = process.standardOutput
 		
 		try process.run()
 		try rhs.process.run() // WARNING: Process.run() vs. ShCmd.run() - which not only runs, but also siphons pipes
@@ -82,18 +76,11 @@ class ShCmd {
 		process.waitUntilExit()
 		rhs.process.waitUntilExit() // always
 
-		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
-		assert(!rhs.process.isRunning)
-
-		return
-			// report on the source of the overall failure, as opposed to the RHS
-			process.terminationStatus != 0 ?
-				(pipes.stdout.siphon(), pipes.stderr.siphon(), process.terminationStatus) :
-					(rhs.pipes.stdout.siphon(), rhs.pipes.stderr.siphon(), rhs.process.terminationStatus)
+		// report on the source of the overall failure, as opposed to the RHS
+		return process.terminationStatus != 0 ? RunResult(for: process) : RunResult(for: rhs.process)
 	}
 	
-	private let pipes = (stdout: Pipe(), stderr: Pipe())
-	private let process = Process() // spawn a subprocess
+	private let process = Process() // will spawn a subprocess
 
 	private typealias PathCache = [String : String] // FIXME: LRU (memory)
 	private /* shared */ static var pathCache: PathCache = [:] // e.g., "ls" >> /usr/bin/which >> "/bin/ls"
@@ -123,6 +110,26 @@ extension ShCmd.RunError: LocalizedError {
 extension ShCmd {
 	static func |(lhs: ShCmd, rhs: ShCmd) throws -> RunResult {
 		return try lhs.run(pipedTo: rhs)
+	}
+}
+
+extension Pipe {
+	func siphon() -> String? {
+		let data = self.fileHandleForReading.readDataToEndOfFile()
+		guard data.count > 0 else { return nil }
+		return String(decoding: data, as: UTF8.self)
+	}
+}
+
+extension ShCmd.RunResult
+{
+	init(for process: Process) {
+		assert(process.standardOutput is Pipe && process.standardError is Pipe)
+		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
+		
+		stdout = (process.standardOutput as? Pipe)?.siphon()
+		stderr = (process.standardError as? Pipe)?.siphon()
+		rc = process.terminationStatus
 	}
 }
 
