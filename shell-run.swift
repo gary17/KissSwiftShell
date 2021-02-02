@@ -2,6 +2,14 @@
 
 import Foundation
 
+extension Pipe {
+	func siphon() -> String? {
+		let data = self.fileHandleForReading.readDataToEndOfFile()
+		guard data.count > 0 else { return nil }
+		return String(decoding: data, as: UTF8.self)
+	}
+}
+
 class ShCmd {
 	enum RunError: Error { case systemError, commandNotFound(command: String) }
 
@@ -10,9 +18,10 @@ class ShCmd {
 	// Process API uses optionals vs. empty collection instances; follow
 	init(path: String, args: [String]? = nil, env: [String : String]? = nil) {
 		process.executableURL = URL(fileURLWithPath: path) // will spawn a subprocess
-		
-		process.arguments = args
-		process.environment = env
+
+		// WARNING: the setter does not like nil-s; 'must provide array of arguments' or NSInvalidArgumentException
+		if let args = args { process.arguments = args }
+		if let env = env { process.environment = env }
 
 		process.standardOutput = pipes.stdout // a FileHandle or a Pipe
 		process.standardError = pipes.stderr
@@ -57,18 +66,32 @@ class ShCmd {
 	func run() throws -> RunResult {
 		try process.run()
 
-		/* nested */ func siphon(_ pipe: Pipe) -> String? {
-			let data = pipe.fileHandleForReading.readDataToEndOfFile()
-			guard data.count > 0 else { return nil }
-			return String(decoding: data, as: UTF8.self)
-		}
-
 		process.waitUntilExit()
 
 		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
-		return (siphon(pipes.stdout), siphon(pipes.stderr), process.terminationStatus)
+		return (pipes.stdout.siphon(), pipes.stderr.siphon(), process.terminationStatus)
 	}
 
+	@discardableResult
+	func run(pipedTo rhs: ShCmd) throws -> RunResult {
+		rhs.process.standardInput = pipes.stdout
+		
+		try process.run()
+		try rhs.process.run() // WARNING: Process.run() vs. ShCmd.run() - which not only runs, but also siphons pipes
+		
+		process.waitUntilExit()
+		rhs.process.waitUntilExit() // always
+
+		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
+		assert(!rhs.process.isRunning)
+
+		return
+			// report on the source of the overall failure, as opposed to the RHS
+			process.terminationStatus != 0 ?
+				(pipes.stdout.siphon(), pipes.stderr.siphon(), process.terminationStatus) :
+					(rhs.pipes.stdout.siphon(), rhs.pipes.stderr.siphon(), rhs.process.terminationStatus)
+	}
+	
 	private let pipes = (stdout: Pipe(), stderr: Pipe())
 	private let process = Process() // spawn a subprocess
 
@@ -130,6 +153,11 @@ do {
 	let start = Date().timeIntervalSince1970
 
 		do {
+			let result = try ShCmd("ls").run()
+			if result.rc == 0, let stdout = result.stdout { print(stdout) }
+		}
+		
+		do {
 			let result = try ShCmd("ls", nil, usePathCache: false).run()
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
@@ -149,6 +177,11 @@ do {
 		}
 		catch { // intended, catch and carry on with subsequent tests
 			print(error.localizedDescription)
+		}
+
+		do {
+			let result = try ShCmd("echo", ["1 2 3"]).run(pipedTo: ShCmd("rev"))
+			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
 	let end = Date().timeIntervalSince1970
