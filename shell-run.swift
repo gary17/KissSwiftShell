@@ -2,7 +2,29 @@
 
 import Foundation
 
-class ShCmd {
+protocol ShRunnable {
+	@discardableResult func run(pipedTo rhs: ShCmd?) throws -> ShCmd.RunResult
+}
+
+class ShCmdPair: ShRunnable {
+	let pair: (lhs: ShRunnable, rhs: ShCmd)
+
+	init(_ lhs: ShRunnable, pipedTo rhs: ShCmd) {
+		pair.lhs = lhs
+		pair.rhs = rhs
+	}
+	
+	@discardableResult func run(pipedTo rhs: ShCmd? = nil) throws -> ShCmd.RunResult {
+		// 1 of 2: LHS
+		let result = try pair.lhs.run(pipedTo: pair.rhs)
+		guard result.rc == 0 else { /* interrupt execution chain */ return result }
+
+		// 2 of 2: RHS
+		return try pair.rhs.run(pipedTo: rhs)
+	}
+}
+
+class ShCmd: ShRunnable {
 	enum RunError: Error { case systemError, commandNotFound(command: String) }
 	struct RunResult { let stdout: String?, stderr: String?, rc: /* follows Process.terminationStatus */ Int32 }
 	
@@ -23,7 +45,6 @@ class ShCmd {
 		usePathCache: Bool = true) throws {
 		
 		/*
-
 		EXECUTABLE PATH RESOLUTION STRATEGY
 
 		- environment: Intel i7 4/8, SSD, Ubuntu 20.04
@@ -32,7 +53,6 @@ class ShCmd {
 			- 50% performance loss, seems to degrade linearly from 100 to 1000 executions
 		- cache-less, (always) resolved through /usr/bin/env: 1000 "ls" executions in 51.21672582626343 seconds
 		- cache-ful, resolved (once) through /usr/bin/which: 1000 "ls" executions in 51.2522189617157 seconds
-
 		*/
 
 		if usePathCache {
@@ -54,25 +74,25 @@ class ShCmd {
 	}
 	
 	@discardableResult
-	func run() throws -> RunResult {
-		try process.run()
-
-		process.waitUntilExit()
-		return RunResult(for: process)
-	}
-
-	@discardableResult
-	func run(pipedTo rhs: ShCmd) throws -> RunResult {
-		rhs.process.standardInput = process.standardOutput
+	func run(pipedTo rhs: ShCmd? = nil) throws -> RunResult {
+		if let rhs = rhs { rhs.process.standardInput = process.standardOutput }
 		
-		try process.run()
-		try rhs.process.run() // WARNING: Process.run() vs. ShCmd.run() - which not only runs, but also siphons pipes
-		
-		process.waitUntilExit()
-		rhs.process.waitUntilExit() // always
+		// FYI: it does not matter whether you run the first process and wait until it completes before
+		// running the second one, or launch two processes in parallel and wait until they both complete
 
-		// report on the source of the overall failure, as opposed to the RHS
-		return process.terminationStatus != 0 ? RunResult(for: process) : RunResult(for: rhs.process)
+		try process.run()
+		process.waitUntilExit()
+		
+		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
+		assert(process.standardOutput is Pipe && process.standardError is Pipe)
+
+		let stdout = rhs != nil ? /* do not siphon the pipe, leave it up for RHS */ nil :
+			(process.standardOutput as? Pipe)?.siphon()
+		
+		return RunResult(
+			stdout: stdout,
+			stderr: (process.standardError as? Pipe)?.siphon(),
+			rc: process.terminationStatus)
 	}
 	
 	private let process = Process() // will spawn a subprocess
@@ -103,8 +123,8 @@ extension ShCmd.RunError: LocalizedError {
 }
 
 extension ShCmd {
-	static func |(lhs: ShCmd, rhs: ShCmd) throws -> RunResult {
-		return try lhs.run(pipedTo: rhs)
+	static func /* operator */ |(lhs: ShCmd, rhs: ShCmd) throws -> ShCmdPair {
+		return ShCmdPair(lhs, pipedTo: rhs)
 	}
 }
 
@@ -113,18 +133,6 @@ extension Pipe {
 		let data = self.fileHandleForReading.readDataToEndOfFile()
 		guard data.count > 0 else { return nil }
 		return String(decoding: data, as: UTF8.self)
-	}
-}
-
-extension ShCmd.RunResult
-{
-	init(for process: Process) {
-		assert(process.standardOutput is Pipe && process.standardError is Pipe)
-		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
-		
-		stdout = (process.standardOutput as? Pipe)?.siphon()
-		stderr = (process.standardError as? Pipe)?.siphon()
-		rc = process.terminationStatus
 	}
 }
 
@@ -188,7 +196,12 @@ do {
 		}
 
 		do {
-			let result = try ShCmd("echo", ["1 2 3"]) | ShCmd("rev")
+			let chain =
+				ShCmdPair(
+					ShCmdPair(try ShCmd("echo", ["1:2:3"]), pipedTo: try ShCmd("rev")),
+						pipedTo: try ShCmd("cut", ["-d", ":", "-f", "1"]))
+
+			let result = try chain.run()
 			if result.rc == 0, let stdout = result.stdout { print(stdout) }
 		}
 
