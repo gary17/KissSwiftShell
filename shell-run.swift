@@ -397,7 +397,11 @@ do {
 	let end = Date().timeIntervalSince1970
 
 	print("executed since [\(Date(timeIntervalSince1970: start))] for [\(end - start)] seconds. done.")
+
+	// set $? explicitly, i.e., "./script.swift && echo completed successfully"
+	exit(0)
 }
 catch {
-	fatalError(error.localizedDescription) // vs. exit(911)
+	if let data = (error.localizedDescription + "\n").data(using: .utf8) { FileHandle.standardError.write(data) }
+	exit(127)
 }
