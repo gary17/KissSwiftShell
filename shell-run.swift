@@ -8,6 +8,10 @@ extension Pipe {
 		guard data.count > 0 else { return nil }
 		return String(decoding: data, as: UTF8.self)
 	}
+	
+	func send(_ out: String) {
+		if out.isEmpty == false, let binOut = out.data(using: .utf8) { self.fileHandleForWriting.write(binOut) }
+	}
 }
 
 extension String {
@@ -16,21 +20,36 @@ extension String {
 	}
 }
 
-protocol ShRunnable {
-	func piped(to rhs: ShCmd) -> ShCmdPair
-	@discardableResult func run(pipedTo rhs: ShCmd?) throws -> ShCmd.RunResult
+enum /* namespace */ ShRun {
+	enum Failure: Error { case systemError, commandNotFound(command: String) }
+
+	typealias Status = Int32 // follow Process.terminationStatus
+	struct Result { let stdout: String?, stderr: String?, rc: Status}
+}
+
+protocol ShRunnable { // FIXME: do not allow an API consumer pipe access or mutation
+	// creational
+	func piped(to rhs: ShRunnable) -> ShCmdPair
+	
+#if false
+	// WARNING: Swift does not like a static operator defined on a protocol (with a default implementation
+	// in a protocol extension), due to "Generic parameter 'Self' could not be inferred" (as of Swift 5.3)
+	static func /* operator */ |(lhs: ShRunnable, rhs: ShRunnable) -> ShCmdPair
+#endif
+
+	// functional
+	@discardableResult func run(pipedTo rhs: ShRunnable?) throws -> ShRun.Result
+	
+	var stdin: Pipe? { get set }
 }
 
 extension ShRunnable {
-	func piped(to rhs: ShCmd) -> ShCmdPair {
+	func piped(to rhs: ShRunnable) -> ShCmdPair {
 		return ShCmdPair(self, pipedTo: rhs)
 	}
 }
 
 class ShCmd: ShRunnable {
-	enum RunError: Error { case systemError, commandNotFound(command: String) }
-	struct RunResult { let stdout: String?, stderr: String?, rc: /* follows Process.terminationStatus */ Int32 }
-
 	// Process API uses optionals vs. empty collection instances; follow
 	private init(resolver: @escaping PathResolver, args: [String]? = nil, env: [String : String]? = nil) {
 		self.resolver = resolver
@@ -68,8 +87,12 @@ class ShCmd: ShRunnable {
 		}
 	}
 	
+	static func /* operator */ |(lhs: ShRunnable, rhs: ShCmd) -> ShCmdPair {
+		return ShCmdPair(lhs, pipedTo: rhs)
+	}
+
 	@discardableResult
-	func run(pipedTo rhs: ShCmd? = nil) throws -> RunResult {
+	func run(pipedTo rhs: ShRunnable? = nil) throws -> ShRun.Result {
 		do {
 			let path = try resolver() // cannot throw out of a lazy property initializer
 			process.executableURL = URL(fileURLWithPath: path)
@@ -81,32 +104,34 @@ class ShCmd: ShRunnable {
 
 		let pipes = (stdout: Pipe(), stderr: Pipe()) // a FileHandle or a Pipe
 
+		if var rhs = rhs { rhs.stdin = pipes.stdout }
+		
 		process.standardOutput = pipes.stdout
 		process.standardError = pipes.stderr
-	
-		if let rhs = rhs { rhs.process.standardInput = pipes.stdout }
 		
-		// FYI: it does not matter whether you run the first process and wait until it completes before
-		// running the second one, or launch two processes in parallel and wait until they both complete
-
 		try process.run()
 		process.waitUntilExit()
 		
 		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
 		let stdout = rhs == nil ? pipes.stdout.siphon() : /* leave it up for the RHS to intake */ nil
 		
-		return RunResult(stdout: stdout, stderr: pipes.stderr.siphon(), rc: process.terminationStatus)
+		return ShRun.Result(stdout: stdout, stderr: pipes.stderr.siphon(), rc: process.terminationStatus)
 	}
 	
 #if false // FIXME: do me
-	typealias RunHandler = (RunResult) -> Void
-	func runAsync(completionHandler: @escaping RunHandler, pipedTo rhs: ShCmd? = nil) throws {
+	typealias RunHandler = (ShRun.Result) -> Void
+	func runAsync(completionHandler: @escaping RunHandler, pipedTo rhs: ShRunnable? = nil) throws {
 		process.terminationHandler = { (process) in
 			// ...
 		}
 	}
 #endif
 
+	internal var stdin: Pipe? {
+		get { precondition(process.standardInput is Pipe); return process.standardInput as? Pipe }
+		set { process.standardInput = newValue }
+	}
+	
 	/*
 	EXECUTABLE PATH RESOLUTION STRATEGY
 
@@ -144,7 +169,7 @@ extension ShCmd
 	}
 }
 
-extension ShCmd.RunError: LocalizedError {
+extension ShRun.Failure: LocalizedError {
 	var errorDescription: String? {
 		switch self {
 			case .systemError:
@@ -152,12 +177,6 @@ extension ShCmd.RunError: LocalizedError {
 			case .commandNotFound(let command):
 				return NSLocalizedString("command '\(command)' not found", comment: "")
 		}
-	}
-}
-
-extension ShCmd {
-	static func /* operator */ |(lhs: ShRunnable, rhs: ShCmd) -> ShCmdPair {
-		return ShCmdPair(lhs, pipedTo: rhs)
 	}
 }
 
@@ -171,13 +190,13 @@ extension ShCmd {
 		
 		// WARNING: missing shell or missing (non- built-in) which might return 127
 		guard result.rc == 0, let stdout = result.stdout
-			else { throw RunError.commandNotFound(command: command) } // user error
+			else { throw ShRun.Failure.commandNotFound(command: command) } // user error
 		
 		let path = stdout.trimmed()
 		
 		// sanity
 		guard path.split(whereSeparator: \.isNewline).count == 1
-			else { throw RunError.systemError } // call devops
+			else { throw ShRun.Failure.systemError } // call devops
 
 		return path
 	}
@@ -191,20 +210,73 @@ extension ShCmd {
 }
 
 class ShCmdPair: ShRunnable {
-	let pair: (lhs: ShRunnable, rhs: ShCmd)
+	var pair: (lhs: ShRunnable, rhs: ShRunnable)
 
-	init(_ lhs: ShRunnable, pipedTo rhs: ShCmd) {
+	init(_ lhs: ShRunnable, pipedTo rhs: ShRunnable) {
 		pair.lhs = lhs
 		pair.rhs = rhs
 	}
 	
 	@discardableResult
-	func run(pipedTo rhs: ShCmd? = nil) throws -> ShCmd.RunResult {
+	func run(pipedTo rhs: ShRunnable? = nil) throws -> ShRun.Result {
 		let result = try pair.lhs.run(pipedTo: pair.rhs)
 		guard result.rc == 0 else { /* interrupt execution chain */ return result }
 
 		return try pair.rhs.run(pipedTo: rhs)
 	}
+	
+	internal var stdin: Pipe? {
+		get { return pair.lhs.stdin }
+		set { pair.lhs.stdin = newValue }
+	}
+}
+
+class ShClosure: ShRunnable {
+	// allow a binary, pipe-based (incremental) interface
+	typealias RunClosure = (_ stdin: Pipe?, _ stdout: Pipe, _ stderr: Pipe) throws -> ShRun.Status
+
+	// allow a textual, string-based (all-or-nothing) interface
+	typealias RunClosure2 = (_ stdin: String?) throws -> ShRun.Result
+
+	init(_ closure: @escaping RunClosure) {
+		self.closure = closure
+	}
+
+	convenience init(_ closure: @escaping RunClosure2) {
+		let inner: RunClosure = { (stdin, stdout, stderr) in
+			let result = try closure(stdin?.siphon())
+			if let text = result.stdout { stdout.send(text) }
+			if let text = result.stderr { stderr.send(text) }
+			return result.rc
+		}
+		self.init(inner)
+	}
+
+	static func /* operator */ |(lhs: ShRunnable, rhs: ShClosure) -> ShCmdPair {
+		return ShCmdPair(lhs, pipedTo: rhs)
+	}
+
+	@discardableResult func run(pipedTo rhs: ShRunnable? = nil) throws -> ShRun.Result {
+		let pipes = (stdout: Pipe(), stderr: Pipe()) // a FileHandle or a Pipe
+
+		if var rhs = rhs { rhs.stdin = pipes.stdout }
+		
+		// analogous to setting Process.standardOutput, Process.standardError
+		let rc = try closure(stdin, pipes.stdout, pipes.stderr)
+		
+		// WARNING: close explicitly or read will hang
+		pipes.stdout.fileHandleForWriting.closeFile()
+		pipes.stderr.fileHandleForWriting.closeFile()
+
+		let stdout = rhs == nil ? pipes.stdout.siphon() : /* leave it up for the RHS to intake */ nil
+		return ShRun.Result(stdout: stdout, stderr: pipes.stderr.siphon(), rc: rc)
+	}
+	
+	private let closure: RunClosure
+	
+	//
+	
+	internal var stdin: Pipe? // ShRunnable
 }
 
 //
@@ -256,9 +328,71 @@ do {
 				sh("echo", ["a:b:c"]) | sh("rev") | sh("cut", ["-d", ":", "-f", "1"])
 			)
 			.run()
+
+			if result.rc == 0, let stdout = result.stdout { print(stdout.trimmed()) }
+		}
+		
+		typealias cl = ShClosure
+
+		do {
+			let result = try (
+				cl { (_, stdout, _) in
+					let out = [ "i", "ii", "iii" ].reduce("", { $0.isEmpty ? $1 : $0 + ":" + $1 })
+					stdout.send(out)
+					return 0
+				} |
+				sh("rev")
+			)
+			.run()
 			
 			if result.rc == 0, let stdout = result.stdout { print(stdout.trimmed()) }
 		}
+
+		do {
+			let result = try (
+				cl { (_) in
+					let out = [ "v", "vi", "vii" ].reduce("", { $0.isEmpty ? $1 : $0 + ":" + $1 })
+					return ShRun.Result(stdout: out, stderr: nil, rc: 0) // FIXME: simplify return syntax
+				} |
+				sh("rev")
+			)
+			.run()
+			
+			if result.rc == 0, let stdout = result.stdout { print(stdout.trimmed()) }
+		}
+
+		do {
+			let result = try (
+				sh("echo", ["A:B:C"]) |
+				sh("rev") |
+				cl { (stdin, stdout, _) in
+					let `in` = stdin?.siphon()?.trimmed()
+					let out = `in`?.split(separator: ":").last.map { String($0) }
+					if let out = out { stdout.send(out) }
+					return 0
+				}
+			)
+			.run()
+			
+			if result.rc == 0, let stdout = result.stdout { print(stdout.trimmed()) }
+		}
+
+		do {
+			let result = try (
+				sh("echo", ["D:E:F"]) |
+				sh("rev") |
+				cl { (stdin) in
+					let out = stdin?.trimmed().split(separator: ":").last.map { String($0) }
+					return ShRun.Result(stdout: out, stderr: nil, rc: 0)
+				}
+			)
+			.run()
+			
+			if result.rc == 0, let stdout = result.stdout { print(stdout.trimmed()) }
+		}
+
+	// FIXME: sh("?") | swiftDump("file.txt") or sh("?") >> "file.txt"
+	// FIXME: launch two processes in parallel and wait until they both complete
 
 	let end = Date().timeIntervalSince1970
 
