@@ -24,7 +24,7 @@ enum /* namespace */ ShRun {
 	enum Failure: Error { case systemError, commandNotFound(command: String) }
 
 	typealias Status = Int32 // follow Process.terminationStatus
-	struct Result { let stdout: String?, stderr: String?, rc: Status}
+	typealias Result = (stdout: String?, stderr: String?, rc: Status)
 }
 
 protocol ShRunnable { // FIXME: do not allow an API consumer pipe access or mutation
@@ -115,7 +115,7 @@ class ShCmd: ShRunnable {
 		assert(!process.isRunning) // or .terminationStatus coredumps (as of Swift 5.3, x86_64-unknown-linux-gnu)
 		let stdout = rhs == nil ? pipes.stdout.siphon() : /* leave it up for the RHS to intake */ nil
 		
-		return ShRun.Result(stdout: stdout, stderr: pipes.stderr.siphon(), rc: process.terminationStatus)
+		return (stdout: stdout, stderr: pipes.stderr.siphon(), rc: process.terminationStatus)
 	}
 	
 #if false // FIXME: do me
@@ -269,7 +269,7 @@ class ShClosure: ShRunnable {
 		pipes.stderr.fileHandleForWriting.closeFile()
 
 		let stdout = rhs == nil ? pipes.stdout.siphon() : /* leave it up for the RHS to intake */ nil
-		return ShRun.Result(stdout: stdout, stderr: pipes.stderr.siphon(), rc: rc)
+		return (stdout: stdout, stderr: pipes.stderr.siphon(), rc: rc)
 	}
 	
 	private let closure: RunClosure
@@ -352,7 +352,7 @@ do {
 			let result = try (
 				cl { (_) in
 					let out = [ "v", "vi", "vii" ].reduce("", { $0.isEmpty ? $1 : $0 + ":" + $1 })
-					return ShRun.Result(stdout: out, stderr: nil, rc: 0) // FIXME: simplify return syntax
+					return (stdout: out, stderr: nil, rc: 0)
 				} |
 				sh("rev")
 			)
@@ -383,7 +383,7 @@ do {
 				sh("rev") |
 				cl { (stdin) in
 					let out = stdin?.trimmed().split(separator: ":").last.map { String($0) }
-					return ShRun.Result(stdout: out, stderr: nil, rc: 0)
+					return (stdout: out, stderr: nil, rc: 0)
 				}
 			)
 			.run()
